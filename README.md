@@ -43,8 +43,3 @@ Usage Instructions\
 
 Collaborators
 This project was developed independently; however, I received guidance from Adegoke Akintoye (My Electronics Teacher) mentor
-
-References
-- Arduino Official Website: [https://www.arduino.cc](https://www.arduino.cc)
-- Fingerprint Sensor Module: [Manufacturer Documentation or Product Link]
-- Relay Module: [Manufacturer Documentation or Product Link]
