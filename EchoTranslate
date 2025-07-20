@@ -1,0 +1,230 @@
+#include <AudioFileSourceBuffer.h>
+#include <AudioGeneratorMP3.h>
+#include <AudioFileSourceFS.h>
+#include <WiFiClientSecure.h>
+#include <AudioOutputI2S.h>
+#include <ArduinoJson.h>
+#include <HTTPClient.h>
+#include <UrlEncode.h>
+#include <Arduino.h>
+#include <SPIFFS.h>
+#include <WiFi.h>
+#include <FS.h>
+
+
+const char* ssid = "ziyad";
+const char* password = "pizza123";
+const char* host = "translate.google.com";
+const char* google_root_ca = R"rawliteral(
+-----BEGIN CERTIFICATE-----
+***************************  //get an SSL Certificate from open ssl for your project
+-----END CERTIFICATE-----
+)rawliteral";
+
+String textinput = "";
+String language = "es"; 
+
+#define DIN 22
+#define BCLK 26
+#define WS  25
+
+AudioGeneratorMP3 *mp3;
+AudioFileSourceFS *file;
+AudioOutputI2S *out;
+
+WiFiClientSecure client;  // Create HTTPS client
+
+void setup(){
+  Serial.begin(115200); //this is the optimal bit per second rate for the esp32
+  WiFi.mode(WIFI_STA);
+  WiFi.disconnect();
+  while (!Serial);
+  // wait for WiFi connection
+  WiFi.begin(ssid,password);
+  Serial.print("Connecting To ");
+  Serial.println(ssid);
+
+  while (WiFi.status() == WL_NO_SSID_AVAIL)
+  {
+    Serial.println("No Wifi is turned on");
+    delay(1000);
+    Serial.println("Waiting...");
+  }
+  while (WiFi.status() != WL_CONNECTED && WiFi.status() != WL_NO_SSID_AVAIL) 
+  {
+   delay(1000);
+   Serial.println("Connecting...");
+  }
+
+  Serial.println("connected");
+  Serial.print("IP address: ");
+  Serial.println(WiFi.localIP());
+
+  // Mount SPIFFS
+  if (!SPIFFS.begin(true)) {
+    Serial.println("Failed to mount SPIFFS!");
+    return;
+  }
+
+  client.setCACert(google_root_ca);
+
+  Serial.println("Connecting to Google...");
+  if (!client.connect(host, 443)) {
+    Serial.println("Connection to Google failed!");    //Connect to the gooogle translateion website
+    return;
+  }
+  else {
+    Serial.println("Connected to google");
+  }
+}
+
+void loop() {
+  String translation = "";
+
+  Serial.print("Start typing Gee.. ");
+
+  while (!Serial.available()) {
+    delay(1000);
+  }
+  
+  while (Serial.available())
+  {
+    char add = Serial.read();
+    textinput = textinput + add;
+    delay(1);
+  }
+  Serial.println(textinput);
+  String E_textinput = urlEncode(textinput);
+  Serial.println(E_textinput);
+
+  String baseUrl = "https://www.apertium.org/apy/translate";
+  String langPair = "?langpair=en|es";
+  String query = "&q=" + E_textinput;
+  String url = baseUrl + langPair + query;
+
+  HTTPClient https;
+
+  Serial.print("[HTTPS] begin...\n");
+  if (https.begin(url)) {  
+    Serial.print("[HTTPS] GET...\n");
+
+    // start connection and send HTTP header
+    int httpCode = https.GET();
+
+    // httpCode will be negative on error
+    // file found at server
+    if (httpCode == HTTP_CODE_OK || httpCode == HTTP_CODE_MOVED_PERMANENTLY) {
+      String payload = https.getString();
+      Serial.println(payload);
+
+
+      DynamicJsonDocument doc(2048);
+
+      DeserializationError error = deserializeJson(doc, payload);
+      if (error) {
+        Serial.print("deserializeJson() failed: ");
+        Serial.println(error.c_str());
+        return;
+    }
+      deserializeJson(doc, payload);
+      translation = doc["responseData"]["translatedText"].as<String>();
+      Serial.print("translatedText: ");
+      Serial.println(translation);
+    }
+    else {
+      Serial.printf("[HTTPS] GET... failed, error: %s\n", https.errorToString(httpCode).c_str());
+    }
+    https.end();
+  }
+  else { 
+    Serial.println("can't connect to HTTPS");
+  }
+  String url2 = "/translate_tts?ie=UTF-8&client=tw-ob&q=" +
+               urlEncode(translation) + "&tl=" + language;
+  Serial.println("Requesting URL: " + url2);
+
+  // Send HTTP GET request with proper headers
+  client.print(String("GET ") + url2 + " HTTP/1.1\r\n" +
+               "Host: " + host + "\r\n" +
+               "User-Agent: Mozilla/5.0\r\n" +
+               "Accept: audio/mpeg\r\n" +  // ✅ Added Accept header
+               "Connection: close\r\n\r\n");
+
+  // Wait for response headers
+  while (client.connected()) {
+    String line = client.readStringUntil('\n');
+    if (line == "\r") {
+      Serial.println("Headers received");
+      break; // Headers done
+    }
+  }
+
+  // Open SPIFFS file for writing
+  File f = SPIFFS.open("/tts.mp3", FILE_WRITE);
+  if (!f) {
+    Serial.println("Failed to open file for writing!");
+    return;
+  }
+
+  Serial.println("Downloading MP3...");
+  uint8_t buff[1024];
+  while (client.connected() || client.available()) {  //More Robust and will wait to ensure all mp3 data is collected
+    size_t len = client.read(buff, sizeof(buff));
+    if (len > 0) {
+        f.write(buff, len);
+    }
+  }
+
+  f.close();
+  client.stop();
+
+  // Check MP3 file size
+  f = SPIFFS.open("/tts.mp3", FILE_READ);
+  Serial.print("MP3 file size: ");
+  Serial.println(f.size());
+  if (f.size() == 0) {
+    Serial.println("Error: MP3 file is empty!");
+    f.close(); // Close again just in case
+    return;    // Exit loop to avoid trying to play
+  }
+  f.close();
+
+  Serial.println("Download complete!");
+
+  // Small delay before playback
+  delay(100);
+
+  // Play MP3
+  Serial.println("Starting playback...");
+  if (SPIFFS.exists("/tts.mp3")) {
+    SPIFFS.remove("/tts.mp3");
+    Serial.println("Existing /tts.mp3 deleted.");
+  }
+  
+  // File f = SPIFFS.open("/tts.mp3", FILE_WRITE); //might use depends
+
+  file = new AudioFileSourceFS(SPIFFS, "/tts.mp3");
+
+  out = new AudioOutputI2S();
+  out->SetPinout(BCLK, WS, DIN); // The working pins (BCLK, WS, DIN)
+  out->SetGain(0.7);
+  out->SetOutputModeMono(true); 
+
+  mp3 = new AudioGeneratorMP3();
+  mp3->begin(file, out);
+
+  while (mp3->isRunning()) {
+  if (!mp3->loop()) {
+    break;
+  }
+  delay(1); // Allow CPU breathing space
+}
+
+  Serial.println("Playback finished.");
+  mp3->stop();
+  delete mp3;
+  mp3 = nullptr;
+  delete out;
+  out = nullptr;
+  textinput = "";
+}
